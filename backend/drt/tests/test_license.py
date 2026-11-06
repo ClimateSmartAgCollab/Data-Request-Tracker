@@ -1,4 +1,5 @@
 import hashlib
+import json
 from unittest.mock import MagicMock, patch
 
 from django.core import mail
@@ -181,6 +182,332 @@ class RenderLicenseTests(SimpleTestCase):
                 {"jinja": "{{ func.__code__.co_code }}"},
                 {"func": lambda: None},
             )
+
+
+ODRL_JSONLD_JINJA = """{
+  "@context": "https://www.w3.org/ns/odrl.jsonld",
+  "type": "{{ policy_type }}",
+  "permission": [
+    {
+      "target": "{{ dataset }}",
+      "action": "{{ action }}"{% if assigner %},
+      "assigner": "{{ assigner }}"{% endif %}{% if constraint_left %},
+      "constraint": [
+        {
+          "leftOperand": "{{ constraint_left }}",
+          "operator": "{{ constraint_op }}",
+          "rightOperand": "{{ constraint_right }}"
+        }
+      ]{% endif %}
+    }
+  ]
+}"""
+
+
+class OdrlJinjaTemplateTests(SimpleTestCase):
+    """Proof that questionnaire-shaped answers slot into CODATA-style ODRL JSON-LD."""
+
+    def test_renders_valid_jsonld_with_optional_constraint(self):
+        submission = {
+            "policy": {
+                "policy_type": "Offer",
+                "dataset": "https://contexthub.example.org/datasets/92md42wd",
+                "action": "read",
+                "assigner": "mailto:owner@example.org",
+                "constraint_left": "spatial",
+                "constraint_op": "eq",
+                "constraint_right": (
+                    "https://www.geonames.org/countries/CA/canada.html"
+                ),
+            }
+        }
+        context = flatten_form_data(submission)
+        rendered = render_license({"jinja": ODRL_JSONLD_JINJA}, context)
+        policy = json.loads(rendered)
+
+        self.assertEqual(policy["@context"], "https://www.w3.org/ns/odrl.jsonld")
+        self.assertEqual(policy["type"], "Offer")
+        permission = policy["permission"][0]
+        self.assertEqual(
+            permission["target"],
+            "https://contexthub.example.org/datasets/92md42wd",
+        )
+        self.assertEqual(permission["action"], "read")
+        self.assertEqual(permission["assigner"], "mailto:owner@example.org")
+        self.assertEqual(
+            permission["constraint"],
+            [
+                {
+                    "leftOperand": "spatial",
+                    "operator": "eq",
+                    "rightOperand": (
+                        "https://www.geonames.org/countries/CA/canada.html"
+                    ),
+                }
+            ],
+        )
+
+    def test_omits_optional_fields_when_blank(self):
+        submission = {
+            "policy": {
+                "policy_type": "Agreement",
+                "dataset": "urn:drt:link:example",
+                "action": "use",
+                "assigner": "",
+                "constraint_left": "",
+                "constraint_op": "",
+                "constraint_right": "",
+            }
+        }
+        context = flatten_form_data(submission)
+        policy = json.loads(
+            render_license({"jinja": ODRL_JSONLD_JINJA}, context)
+        )
+        permission = policy["permission"][0]
+        self.assertEqual(policy["type"], "Agreement")
+        self.assertEqual(permission["action"], "use")
+        self.assertNotIn("assigner", permission)
+        self.assertNotIn("constraint", permission)
+
+
+ODRL_JSONLD_JINJA_V2 = """{
+  "@context": "https://www.w3.org/ns/odrl.jsonld",
+  "type": "{{ policy_type }}"{% if description %},
+  "dcterms:description": "{{ description }}"{% endif %},
+  "permission": [
+    {
+      "target": "{{ dataset }}",
+      "action": "{{ action }}"{% if assigner %},
+      "assigner": "{{ assigner }}"{% endif %}{% if purpose %},
+      "constraint": [
+        {
+          "leftOperand": "purpose",
+          "operator": "eq",
+          "rightOperand": "{{ purpose }}"
+        }
+      ]{% endif %}
+    }
+  ]{% if prohibit_action %},
+  "prohibition": [
+    {
+      "target": "{{ dataset }}",
+      "action": "{{ prohibit_action }}"{% if prohibit_until %},
+      "constraint": [
+        {
+          "leftOperand": "dateTime",
+          "operator": "lt",
+          "rightOperand": "{{ prohibit_until }}"
+        }
+      ]{% endif %}
+    }
+  ]{% endif %}{% if duty_action %},
+  "obligation": [
+    {
+      "action": "{{ duty_action }}"{% if duty_assignee %},
+      "assignee": "{{ duty_assignee }}"{% endif %}
+    }
+  ]{% endif %}
+}"""
+
+
+class OdrlJinjaTemplateV2Tests(SimpleTestCase):
+    """Version 2: 4-tab CODATA studio fields slot into richer ODRL JSON-LD."""
+
+    def test_renders_permission_prohibition_and_obligation(self):
+        submission = {
+            "policy": {
+                "policy_type": "Offer",
+                "description": (
+                    "Offer to read this dataset for research, "
+                    "not commercial redistribution."
+                ),
+                "dataset": "https://contexthub.example.org/datasets/92md42wd",
+                "assigner": "mailto:owner@example.org",
+                "action": "read",
+                "purpose": "research",
+                "prohibit_action": "distribute",
+                "prohibit_until": "2028-12-31",
+                "duty_action": "attribute",
+                "duty_assignee": "mailto:owner@example.org",
+            }
+        }
+        context = flatten_form_data(submission)
+        policy = json.loads(
+            render_license({"jinja": ODRL_JSONLD_JINJA_V2}, context)
+        )
+
+        self.assertEqual(policy["type"], "Offer")
+        self.assertEqual(
+            policy["dcterms:description"],
+            "Offer to read this dataset for research, "
+            "not commercial redistribution.",
+        )
+        permission = policy["permission"][0]
+        self.assertEqual(permission["action"], "read")
+        self.assertEqual(
+            permission["constraint"][0]["rightOperand"],
+            "research",
+        )
+        prohibition = policy["prohibition"][0]
+        self.assertEqual(prohibition["action"], "distribute")
+        self.assertEqual(
+            prohibition["constraint"][0]["rightOperand"],
+            "2028-12-31",
+        )
+        obligation = policy["obligation"][0]
+        self.assertEqual(obligation["action"], "attribute")
+        self.assertEqual(
+            obligation["assignee"],
+            "mailto:owner@example.org",
+        )
+
+    def test_omits_prohibition_and_obligation_when_blank(self):
+        submission = {
+            "policy": {
+                "policy_type": "Offer",
+                "description": "",
+                "dataset": "urn:drt:link:example",
+                "assigner": "",
+                "action": "use",
+                "purpose": "",
+                "prohibit_action": "",
+                "prohibit_until": "",
+                "duty_action": "",
+                "duty_assignee": "",
+            }
+        }
+        policy = json.loads(
+            render_license(
+                {"jinja": ODRL_JSONLD_JINJA_V2},
+                flatten_form_data(submission),
+            )
+        )
+        permission = policy["permission"][0]
+        self.assertEqual(policy["type"], "Offer")
+        self.assertNotIn("dcterms:description", policy)
+        self.assertEqual(permission["action"], "use")
+        self.assertNotIn("assigner", permission)
+        self.assertNotIn("constraint", permission)
+        self.assertNotIn("prohibition", policy)
+        self.assertNotIn("obligation", policy)
+
+
+ODRL_JSONLD_JINJA_AGREEMENT = """{
+  "@context": "https://www.w3.org/ns/odrl.jsonld",
+  "type": "Agreement",
+  "dcterms:description": "Agreement to read this dataset for research, not commercial redistribution.",
+  "permission": [
+    {
+      "target": "{{ dr.data_label }}",
+      "action": "read",
+      "assigner": "mailto:{{ dr.owner_email }}",
+      "assignee": "mailto:{{ dr.requestor_email }}",
+      "constraint": [
+        {
+          "leftOperand": "purpose",
+          "operator": "eq",
+          "rightOperand": "research"
+        }
+      ]
+    }
+  ],
+  "prohibition": [
+    {
+      "target": "{{ dr.data_label }}",
+      "action": "distribute",
+      "constraint": [
+        {
+          "leftOperand": "dateTime",
+          "operator": "lt",
+          "rightOperand": "{{ end_date }}"
+        }
+      ]
+    }
+  ],
+  "obligation": [
+    {
+      "action": "attribute",
+      "assignee": "mailto:{{ dr.requestor_email }}"
+    }
+  ]
+}"""
+
+
+class OdrlAgreementTemplateTests(SimpleTestCase):
+    """Canned library Agreement: DRT fills parties; form supplies the end date."""
+
+    def setUp(self):
+        owner_table = {
+            "owner-1": {
+                "owner_email": "owner@example.org",
+                "username": "owner",
+            }
+        }
+        cache_patch = patch(
+            "drt.services.license.cache.get",
+            return_value=owner_table,
+        )
+        cache_patch.start()
+        self.addCleanup(cache_patch.stop)
+
+    def _nlink(self):
+        nlink = MagicMock()
+        nlink.data_label = "https://contexthub.example.org/datasets/92md42wd"
+        nlink.record_label = "Record"
+        nlink.visible_label = None
+        nlink.tags = []
+        nlink.requestor_email = "requestor@example.org"
+        nlink.owner_id = "owner-1"
+        nlink.license_id = "l-001"
+        nlink.link_id = "link-1"
+        return nlink
+
+    def test_renders_agreement_from_dr_context_and_end_date(self):
+        submission = {
+            "in_canada": "yes",
+            "for_research": "yes",
+            "end_date": "2028-12-31",
+        }
+        context = build_license_context(
+            submission_data=submission,
+            nlink=self._nlink(),
+        )
+        policy = json.loads(
+            render_license(
+                {"jinja": ODRL_JSONLD_JINJA_AGREEMENT},
+                context,
+            )
+        )
+
+        self.assertEqual(policy["@context"], "https://www.w3.org/ns/odrl.jsonld")
+        self.assertEqual(policy["type"], "Agreement")
+        permission = policy["permission"][0]
+        self.assertEqual(
+            permission["target"],
+            "https://contexthub.example.org/datasets/92md42wd",
+        )
+        self.assertEqual(permission["action"], "read")
+        self.assertEqual(permission["assigner"], "mailto:owner@example.org")
+        self.assertEqual(
+            permission["assignee"],
+            "mailto:requestor@example.org",
+        )
+        self.assertEqual(
+            permission["constraint"][0]["rightOperand"],
+            "research",
+        )
+        prohibition = policy["prohibition"][0]
+        self.assertEqual(prohibition["action"], "distribute")
+        self.assertEqual(
+            prohibition["constraint"][0]["rightOperand"],
+            "2028-12-31",
+        )
+        obligation = policy["obligation"][0]
+        self.assertEqual(obligation["action"], "attribute")
+        self.assertEqual(
+            obligation["assignee"],
+            "mailto:requestor@example.org",
+        )
 
 
 class IssuedLicensePersistTests(TestCase):

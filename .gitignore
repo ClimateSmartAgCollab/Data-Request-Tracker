@@ -7,6 +7,9 @@
 infra/.env
 !.env.example
 .cursor/
+.agents/
+.claude/
+skills-lock.json
 pgdata/
 drt_landing_page/
 backend/static/admin/

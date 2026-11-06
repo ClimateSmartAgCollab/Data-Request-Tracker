@@ -107,6 +107,12 @@ const content = {
                 "b5c921ba-7108-44bf-9870-9e4126cd8f9a"
               ),
             },
+            {
+              label: "Research ODRL Agreement",
+              url: negotiationGenerateUrl(
+                "c4e8a1b0-7f3d-4a92-9e16-2b8d5c0f1a77"
+              ),
+            },
           ],
         },
         {
@@ -243,6 +249,12 @@ const content = {
               label: "Demande de données détaillées",
               url: negotiationGenerateUrl(
                 "b5c921ba-7108-44bf-9870-9e4126cd8f9a"
+              ),
+            },
+            {
+              label: "Accord ODRL de recherche",
+              url: negotiationGenerateUrl(
+                "c4e8a1b0-7f3d-4a92-9e16-2b8d5c0f1a77"
               ),
             },
           ],
